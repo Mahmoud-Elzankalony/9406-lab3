@@ -28,21 +28,127 @@
 #include "command.h"
 #include "tokenizer.h"
 
-
 void parse(std::vector<Token> &tokens)
 {
+    if (tokens.empty())
+        return;
+
     Command currentCommand;
     SimpleCommand *currentSimpleCommand = new SimpleCommand();
 
-    currentCommand.execute();
-    /*
-      Implement this function 
-      you must parse for all possible tokens scenario
-      right now command.execute only print the format , you will inject it in your logic.
+    for (size_t i = 0; i < tokens.size(); i++)
+    {
+        Token token = tokens[i];
 
-    */
+        switch (token.type)
+        {
+            case TOKEN_COMMAND:
+            case TOKEN_ARGUMENT:
+            {
+                char *argument = strdup(token.value.c_str());
+                currentSimpleCommand->insertArgument(argument);
+                break;
+            }
+
+            case TOKEN_PIPE:
+            {
+                if (currentSimpleCommand->_numberOfArguments == 0)
+                {
+                    printf("Syntax error: Empty command before pipe\n");
+                    delete currentSimpleCommand;
+                    currentCommand.clear();
+                    return;
+                }
+
+                currentCommand.insertSimpleCommand(currentSimpleCommand);
+                currentSimpleCommand = new SimpleCommand();
+                break;
+            }
+
+            case TOKEN_REDIRECT:
+            case TOKEN_APPEND:
+            case TOKEN_INPUT:
+            case TOKEN_ERROR:
+            case TOKEN_REDIRECT_AND_ERROR:
+            {
+                if (i + 1 >= tokens.size() ||
+                    tokens[i + 1].type == TOKEN_EOF ||
+                    tokens[i + 1].type == TOKEN_PIPE)
+                {
+                    printf("Syntax error: Missing redirection filename\n");
+                    delete currentSimpleCommand;
+                    currentCommand.clear();
+                    return;
+                }
+
+                char *filename = strdup(tokens[++i].value.c_str());
+
+                switch (token.type)
+                {
+                    case TOKEN_REDIRECT:
+                        free(currentCommand._outFile);
+                        currentCommand._outFile = filename;
+                        currentCommand._append = 0;
+                        break;
+
+                    case TOKEN_APPEND:
+                        free(currentCommand._outFile);
+                        currentCommand._outFile = filename;
+                        currentCommand._append = 1;
+                        break;
+
+                    case TOKEN_INPUT:
+                        free(currentCommand._inputFile);
+                        currentCommand._inputFile = filename;
+                        break;
+
+                    case TOKEN_ERROR:
+                        free(currentCommand._errFile);
+                        currentCommand._errFile = filename;
+                        break;
+
+                    case TOKEN_REDIRECT_AND_ERROR:
+                        free(currentCommand._outFile);
+                        free(currentCommand._errFile);
+                        currentCommand._outFile = filename;
+                        currentCommand._errFile = strdup(filename);
+                        currentCommand._out_error = 1;
+                        break;
+
+                    default:
+                        break;
+                }
+
+                break;
+            }
+
+            case TOKEN_BACKGROUND:
+                currentCommand._background = 1;
+                break;
+
+            case TOKEN_EOF:
+                break;
+        }
+    }
+
+    if (currentSimpleCommand->_numberOfArguments > 0)
+    {
+        currentCommand.insertSimpleCommand(currentSimpleCommand);
+    }
+    else
+    {
+        delete currentSimpleCommand;
+    }
+
+    if (currentCommand._numberOfSimpleCommands > 0)
+    {
+        currentCommand.execute();
+    }
+    else
+    {
+        currentCommand.clear();
+    }
 }
-
 SimpleCommand::SimpleCommand()
 {
     _numberOfAvailableArguments = 5;
