@@ -27,6 +27,14 @@
 #include <sstream>
 #include "command.h"
 #include "tokenizer.h"
+#include <cerrno>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
+
+
+
+
 
 
 
@@ -48,6 +56,15 @@ void parse(std::vector<Token> &tokens)
             case TOKEN_ARGUMENT:
             {
                 char *argument = strdup(token.value.c_str());
+
+                if (argument == NULL)
+                {
+                    fprintf(stderr,
+                            "Error: Memory allocation failed for argument.\n");
+                    delete currentSimpleCommand;
+                    return;
+                }
+
                 currentSimpleCommand->insertArgument(argument);
                 break;
             }
@@ -56,9 +73,9 @@ void parse(std::vector<Token> &tokens)
             {
                 if (currentSimpleCommand->_numberOfArguments == 0)
                 {
-                    printf("Syntax error: Empty command before pipe\n");
+                    fprintf(stderr,
+                            "Syntax error: Missing command before '|'.\n");
                     delete currentSimpleCommand;
-                    currentCommand.clear();
                     return;
                 }
 
@@ -73,23 +90,43 @@ void parse(std::vector<Token> &tokens)
             case TOKEN_ERROR:
             case TOKEN_REDIRECT_AND_ERROR:
             {
-                if (i + 1 >= tokens.size() ||
-                    tokens[i + 1].type == TOKEN_EOF ||
-                    tokens[i + 1].type == TOKEN_PIPE ||
-                    tokens[i + 1].type == TOKEN_BACKGROUND ||
-                    tokens[i + 1].type == TOKEN_REDIRECT ||
-                    tokens[i + 1].type == TOKEN_APPEND ||
-                    tokens[i + 1].type == TOKEN_INPUT ||
-                    tokens[i + 1].type == TOKEN_ERROR ||
-                    tokens[i + 1].type == TOKEN_REDIRECT_AND_ERROR)
+                if (i + 1 >= tokens.size())
                 {
-                    printf("Syntax error: Missing redirection filename\n");
+                    fprintf(stderr,
+                            "Syntax error: Missing filename after redirection.\n");
                     delete currentSimpleCommand;
-                    currentCommand.clear();
                     return;
                 }
 
-                char *filename = strdup(tokens[++i].value.c_str());
+                Token nextToken = tokens[i + 1];
+
+                if (nextToken.type == TOKEN_EOF ||
+                    nextToken.type == TOKEN_PIPE ||
+                    nextToken.type == TOKEN_BACKGROUND ||
+                    nextToken.type == TOKEN_REDIRECT ||
+                    nextToken.type == TOKEN_APPEND ||
+                    nextToken.type == TOKEN_INPUT ||
+                    nextToken.type == TOKEN_ERROR ||
+                    nextToken.type == TOKEN_REDIRECT_AND_ERROR)
+                {
+                    fprintf(stderr,
+                            "Syntax error: Invalid or missing filename after redirection '%s'.\n",
+                            token.value.c_str());
+                    delete currentSimpleCommand;
+                    return;
+                }
+
+                char *filename = strdup(nextToken.value.c_str());
+
+                if (filename == NULL)
+                {
+                    fprintf(stderr,
+                            "Error: Memory allocation failed for filename.\n");
+                    delete currentSimpleCommand;
+                    return;
+                }
+
+                i++;
 
                 switch (token.type)
                 {
@@ -137,11 +174,21 @@ void parse(std::vector<Token> &tokens)
 
             case TOKEN_BACKGROUND:
             {
-                if (i + 1 < tokens.size() - 1)
+                if (i + 1 < tokens.size() &&
+                    tokens[i + 1].type != TOKEN_EOF)
                 {
-                    printf("Syntax error: Unexpected token after '&'\n");
+                    fprintf(stderr,
+                            "Syntax error: '&' must appear at the end of the command.\n");
                     delete currentSimpleCommand;
-                    currentCommand.clear();
+                    return;
+                }
+
+                if (currentSimpleCommand->_numberOfArguments == 0 &&
+                    currentCommand._numberOfSimpleCommands == 0)
+                {
+                    fprintf(stderr,
+                            "Syntax error: Missing command before '&'.\n");
+                    delete currentSimpleCommand;
                     return;
                 }
 
@@ -151,6 +198,11 @@ void parse(std::vector<Token> &tokens)
 
             case TOKEN_EOF:
                 break;
+
+            default:
+                fprintf(stderr, "Syntax error: Unexpected token.\n");
+                delete currentSimpleCommand;
+                return;
         }
     }
 
@@ -164,21 +216,21 @@ void parse(std::vector<Token> &tokens)
 
         if (currentCommand._numberOfSimpleCommands > 0)
         {
-            printf("Syntax error: Missing command after pipe\n");
-            currentCommand.clear();
+            fprintf(stderr,
+                    "Syntax error: Missing command after '|'.\n");
             return;
         }
     }
 
-    if (currentCommand._numberOfSimpleCommands > 0)
+    if (currentCommand._numberOfSimpleCommands == 0)
     {
-        currentCommand.execute();
+        fprintf(stderr, "Syntax error: No command to execute.\n");
+        return;
     }
-    else
-    {
-        currentCommand.clear();
-    }
+
+    currentCommand.execute();
 }
+
 
 SimpleCommand::SimpleCommand()
 {
@@ -291,11 +343,12 @@ void Command::print()
 
 
 
+
 void Command::execute()
 {
     if (_numberOfSimpleCommands == 0)
     {
-        clear();
+        fprintf(stderr, "Error: No command to execute.\n");
         return;
     }
 
@@ -305,18 +358,36 @@ void Command::execute()
 
     for (int i = 0; i < numberOfCommands; i++)
     {
+        if (_simpleCommands[i] == NULL ||
+            _simpleCommands[i]->_numberOfArguments == 0 ||
+            _simpleCommands[i]->_arguments[0] == NULL)
+        {
+            fprintf(stderr,
+                    "Error: Empty command at position %d.\n", i + 1);
+
+            if (previousPipeRead != -1)
+                close(previousPipeRead);
+
+            for (size_t j = 0; j < childPids.size(); j++)
+                waitpid(childPids[j], NULL, 0);
+
+            return;
+        }
+
         int pipefd[2] = {-1, -1};
 
         if (i < numberOfCommands - 1)
         {
             if (pipe(pipefd) == -1)
             {
-                perror("pipe");
+                perror("Error: Failed to create pipe");
 
                 if (previousPipeRead != -1)
                     close(previousPipeRead);
 
-                clear();
+                for (size_t j = 0; j < childPids.size(); j++)
+                    waitpid(childPids[j], NULL, 0);
+
                 return;
             }
         }
@@ -325,7 +396,7 @@ void Command::execute()
 
         if (pid == -1)
         {
-            perror("fork");
+            perror("Error: Failed to create child process");
 
             if (previousPipeRead != -1)
                 close(previousPipeRead);
@@ -336,37 +407,35 @@ void Command::execute()
             if (pipefd[1] != -1)
                 close(pipefd[1]);
 
-            if (!_background)
+            for (size_t j = 0; j < childPids.size(); j++)
             {
-                for (size_t j = 0; j < childPids.size(); j++)
+                while (waitpid(childPids[j], NULL, 0) == -1 &&
+                       errno == EINTR)
                 {
-                    while (waitpid(childPids[j], NULL, 0) == -1 &&
-                           errno == EINTR)
-                    {
-                    }
                 }
             }
 
-            clear();
             return;
         }
 
         if (pid == 0)
         {
+            // Connect the previous command to standard input.
             if (previousPipeRead != -1)
             {
                 if (dup2(previousPipeRead, STDIN_FILENO) == -1)
                 {
-                    perror("dup2");
+                    perror("Error: Failed to redirect pipe input");
                     _exit(1);
                 }
             }
 
+            // Connect this command to the next command.
             if (pipefd[1] != -1)
             {
                 if (dup2(pipefd[1], STDOUT_FILENO) == -1)
                 {
-                    perror("dup2");
+                    perror("Error: Failed to redirect pipe output");
                     _exit(1);
                 }
             }
@@ -380,19 +449,22 @@ void Command::execute()
             if (pipefd[1] != -1)
                 close(pipefd[1]);
 
+            // Input redirection applies to the first command.
             if (i == 0 && _inputFile != NULL)
             {
                 int fd = open(_inputFile, O_RDONLY);
 
                 if (fd == -1)
                 {
-                    perror(_inputFile);
+                    fprintf(stderr, "myshell: Cannot open input file '%s': ",
+                            _inputFile);
+                    perror(NULL);
                     _exit(1);
                 }
 
                 if (dup2(fd, STDIN_FILENO) == -1)
                 {
-                    perror("dup2");
+                    perror("Error: Failed to redirect input");
                     close(fd);
                     _exit(1);
                 }
@@ -400,26 +472,26 @@ void Command::execute()
                 close(fd);
             }
 
+            // Output redirection applies to the last command.
             if (i == numberOfCommands - 1 && _outFile != NULL)
             {
                 int flags = O_WRONLY | O_CREAT;
 
-                if (_append)
-                    flags |= O_APPEND;
-                else
-                    flags |= O_TRUNC;
+                flags |= (_append ? O_APPEND : O_TRUNC);
 
                 int fd = open(_outFile, flags, 0666);
 
                 if (fd == -1)
                 {
-                    perror(_outFile);
+                    fprintf(stderr, "myshell: Cannot open output file '%s': ",
+                            _outFile);
+                    perror(NULL);
                     _exit(1);
                 }
 
                 if (dup2(fd, STDOUT_FILENO) == -1)
                 {
-                    perror("dup2");
+                    perror("Error: Failed to redirect output");
                     close(fd);
                     _exit(1);
                 }
@@ -428,7 +500,7 @@ void Command::execute()
                 {
                     if (dup2(fd, STDERR_FILENO) == -1)
                     {
-                        perror("dup2");
+                        perror("Error: Failed to redirect standard error");
                         close(fd);
                         _exit(1);
                     }
@@ -437,6 +509,7 @@ void Command::execute()
                 close(fd);
             }
 
+            // Error redirection applies to the last command.
             if (i == numberOfCommands - 1 &&
                 _errFile != NULL &&
                 !_out_error)
@@ -449,13 +522,15 @@ void Command::execute()
 
                 if (fd == -1)
                 {
-                    perror(_errFile);
+                    fprintf(stderr, "myshell: Cannot open error file '%s': ",
+                            _errFile);
+                    perror(NULL);
                     _exit(1);
                 }
 
                 if (dup2(fd, STDERR_FILENO) == -1)
                 {
-                    perror("dup2");
+                    perror("Error: Failed to redirect standard error");
                     close(fd);
                     _exit(1);
                 }
@@ -463,22 +538,23 @@ void Command::execute()
                 close(fd);
             }
 
-            if (_simpleCommands[i]->_numberOfArguments == 0 ||
-                _simpleCommands[i]->_arguments[0] == NULL)
-            {
-                _exit(1);
-            }
-
+            // Execute the command.
             execvp(
                 _simpleCommands[i]->_arguments[0],
                 _simpleCommands[i]->_arguments
             );
 
-            perror(_simpleCommands[i]->_arguments[0]);
-            _exit(127);
+            int savedErrno = errno;
+
+            fprintf(stderr, "myshell: %s: %s\n",
+                    _simpleCommands[i]->_arguments[0],
+                    strerror(savedErrno));
+
+            _exit(savedErrno == ENOENT ? 127 : 126);
         }
         else
         {
+            // Parent process.
             childPids.push_back(pid);
 
             if (previousPipeRead != -1)
@@ -494,6 +570,7 @@ void Command::execute()
     if (previousPipeRead != -1)
         close(previousPipeRead);
 
+    // Wait for foreground commands only.
     if (!_background)
     {
         for (size_t i = 0; i < childPids.size(); i++)
@@ -507,11 +584,14 @@ void Command::execute()
             while (result == -1 && errno == EINTR);
 
             if (result == -1)
-                perror("waitpid");
+                perror("Error: waitpid failed");
         }
     }
-
-    clear();
+    else
+    {
+        fprintf(stderr, "[Background process started: PID %d]\n",
+                static_cast<int>(childPids[0]));
+    }
 }
 
 void Command::prompt()
